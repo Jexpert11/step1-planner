@@ -13,6 +13,10 @@ export type Task = {
 
 const TASK_ORDER: TaskType[] = ['questions', 'review', 'anki', 'reading']
 
+const QUESTION_BLOCK_MINUTES = 60
+const WEEKS_UNTIL_CRUNCH = 8
+const CRUNCH_DAYS = WEEKS_UNTIL_CRUNCH * 7
+
 const QUESTION_BANKS: ResourceId[] = ['uworld', 'combank', 'amboss']
 const READING_RESOURCES: ResourceId[] = [
   'pathoma',
@@ -32,19 +36,22 @@ const RESOURCE_LABELS: Record<ResourceId, string> = {
   goljan: 'Goljan',
 }
 
-type PhaseWeights = Record<TaskType, number>
+type TimeSplit = Record<TaskType, number>
 
-function phaseWeights(daysUntil: number): PhaseWeights {
-  if (daysUntil > 90) {
-    return { questions: 0.32, review: 0.18, anki: 0.22, reading: 0.28 }
+function timeSplit(daysUntil: number): TimeSplit {
+  const withinEightWeeks = daysUntil <= CRUNCH_DAYS
+  return {
+    questions: withinEightWeeks ? 0.5 : 0.4,
+    review: 0.3,
+    anki: 0.2,
+    reading: withinEightWeeks ? 0.05 : 0.1,
   }
-  if (daysUntil < 30) {
-    return { questions: 0.48, review: 0.28, anki: 0.14, reading: 0.1 }
-  }
-  return { questions: 0.4, review: 0.24, anki: 0.2, reading: 0.16 }
 }
 
-function pickQuestionBank(resources: ResourceId[], examType: UserProfile['examType']): ResourceId | null {
+function pickQuestionBank(
+  resources: ResourceId[],
+  examType: UserProfile['examType'],
+): ResourceId | null {
   const banks = QUESTION_BANKS.filter((r) => resources.includes(r))
   if (banks.length === 0) return null
 
@@ -59,7 +66,7 @@ function pickQuestionBank(resources: ResourceId[], examType: UserProfile['examTy
 
 function readingLabel(resources: ResourceId[]): string {
   const reading = READING_RESOURCES.filter((r) => resources.includes(r))
-  if (reading.length === 0) return 'Content review'
+  if (reading.length === 0) return 'Reading'
   if (reading.length === 1) return RESOURCE_LABELS[reading[0]]
   if (reading.length === 2) {
     return `${RESOURCE_LABELS[reading[0]]} & ${RESOURCE_LABELS[reading[1]]}`
@@ -67,37 +74,25 @@ function readingLabel(resources: ResourceId[]): string {
   return `${RESOURCE_LABELS[reading[0]]} + ${reading.length - 1} more`
 }
 
-function questionBlockSize(daysUntil: number, hoursPerDay: number): { qs: number; label: string } {
-  if (daysUntil < 30) {
-    return { qs: 40, label: '40 qs' }
-  }
-  if (hoursPerDay >= 8) {
-    return { qs: 40, label: '40 qs' }
-  }
-  if (hoursPerDay >= 5) {
-    return { qs: 30, label: '30 qs' }
-  }
-  return { qs: 20, label: '20 qs' }
+function minutesForType(
+  type: TaskType,
+  totalMinutes: number,
+  split: TimeSplit,
+): number {
+  return Math.round(totalMinutes * split[type])
 }
 
 export function generateTodayTasks(profile: UserProfile): Task[] {
   const daysUntil = getDaysUntilExam(profile.examDate)
   const totalMinutes = Math.round(profile.hoursPerDay * 60)
-  const weights = phaseWeights(daysUntil)
+  const split = timeSplit(daysUntil)
   const { resources } = profile
 
   const hasQBank = QUESTION_BANKS.some((r) => resources.includes(r))
   const hasAnki = resources.includes('anki')
   const hasReading = READING_RESOURCES.some((r) => resources.includes(r))
 
-  const activeTypes: TaskType[] = []
-  if (hasQBank) {
-    activeTypes.push('questions', 'review')
-  }
-  if (hasAnki) activeTypes.push('anki')
-  if (hasReading) activeTypes.push('reading')
-
-  if (activeTypes.length === 0) {
+  if (!hasQBank && !hasAnki && !hasReading) {
     return [
       {
         id: 1,
@@ -109,35 +104,19 @@ export function generateTodayTasks(profile: UserProfile): Task[] {
     ]
   }
 
-  const weightSum = activeTypes.reduce((sum, t) => sum + weights[t], 0)
-  const rawMinutes = Object.fromEntries(
-    activeTypes.map((t) => [
-      t,
-      Math.round((weights[t] / weightSum) * totalMinutes),
-    ]),
-  ) as Record<TaskType, number>
-
-  let allocated = activeTypes.reduce((sum, t) => sum + rawMinutes[t], 0)
-  const remainder = totalMinutes - allocated
-  if (remainder !== 0 && activeTypes.length > 0) {
-    rawMinutes[activeTypes[0]] += remainder
-    allocated += remainder
-  }
-
   const candidates: Omit<Task, 'id' | 'completed'>[] = []
 
   if (hasQBank) {
     const bank = pickQuestionBank(resources, profile.examType)!
-    const block = questionBlockSize(daysUntil, profile.hoursPerDay)
     candidates.push({
       type: 'questions',
-      label: `${RESOURCE_LABELS[bank]} blocks (${block.label})`,
-      minutes: Math.max(25, rawMinutes.questions),
+      label: `${RESOURCE_LABELS[bank]} block (40 qs · ${QUESTION_BLOCK_MINUTES} min)`,
+      minutes: minutesForType('questions', totalMinutes, split),
     })
     candidates.push({
       type: 'review',
-      label: 'Review missed questions',
-      minutes: Math.max(15, rawMinutes.review),
+      label: 'Review answers',
+      minutes: minutesForType('review', totalMinutes, split),
     })
   }
 
@@ -145,7 +124,7 @@ export function generateTodayTasks(profile: UserProfile): Task[] {
     candidates.push({
       type: 'anki',
       label: 'Anki review (spaced repetition)',
-      minutes: Math.max(15, rawMinutes.anki),
+      minutes: minutesForType('anki', totalMinutes, split),
     })
   }
 
@@ -153,7 +132,7 @@ export function generateTodayTasks(profile: UserProfile): Task[] {
     candidates.push({
       type: 'reading',
       label: `${readingLabel(resources)} study`,
-      minutes: Math.max(15, rawMinutes.reading),
+      minutes: minutesForType('reading', totalMinutes, split),
     })
   }
 
@@ -171,7 +150,7 @@ export function labelForType(type: TaskType): string {
     case 'questions':
       return 'Practice questions'
     case 'review':
-      return 'Review wrong answers'
+      return 'Review answers'
     case 'anki':
       return 'Anki'
     case 'reading':
