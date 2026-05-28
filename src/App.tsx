@@ -1,45 +1,45 @@
 import { useMemo, useState } from 'react'
+import { Onboarding } from './Onboarding'
+import {
+  examTypeLabel,
+  getDaysUntilExam,
+  loadProfile,
+  saveProfile,
+  type UserProfile,
+} from './profile'
+import {
+  generateTodayTasks,
+  labelForType,
+  priorityLabelForType,
+  type Task,
+} from './taskGenerator'
 import './App.css'
 
 type TabId = 'home' | 'plan' | 'topics' | 'scores'
 
-type TaskType = 'questions' | 'review' | 'anki' | 'reading'
-
-type Task = {
-  id: number
-  label: string
-  type: TaskType
-  minutes: number
-  completed: boolean
-}
-
-const USER_NAME = 'Alex'
-const DAYS_UNTIL_EXAM = 42
-
-const TASK_ORDER: TaskType[] = ['questions', 'review', 'anki', 'reading']
-
-function createTodayTasks(): Task[] {
-  const base: Omit<Task, 'id' | 'completed'>[] = [
-    { label: 'UWORLD blocks (40 qs)', type: 'questions', minutes: 75 },
-    { label: 'Review missed questions', type: 'review', minutes: 45 },
-    { label: 'Anki review (Spaced Repetition)', type: 'anki', minutes: 30 },
-    { label: 'Pathoma / FA reading', type: 'reading', minutes: 40 },
-  ]
-
-  return base
-    .sort(
-      (a, b) => TASK_ORDER.indexOf(a.type) - TASK_ORDER.indexOf(b.type),
-    )
-    .map((task, index) => ({
-      id: index + 1,
-      completed: false,
-      ...task,
-    }))
-}
-
 const App = () => {
+  const [profile, setProfile] = useState<UserProfile | null>(() => loadProfile())
   const [activeTab, setActiveTab] = useState<TabId>('home')
-  const [tasks, setTasks] = useState<Task[]>(() => createTodayTasks())
+  const [tasks, setTasks] = useState<Task[]>(() => {
+    const p = loadProfile()
+    return p ? generateTodayTasks(p) : []
+  })
+
+  const handleOnboardingComplete = (newProfile: UserProfile) => {
+    saveProfile(newProfile)
+    setProfile(newProfile)
+    setTasks(generateTodayTasks(newProfile))
+  }
+
+  if (!profile) {
+    return (
+      <div className="app-shell">
+        <Onboarding onComplete={handleOnboardingComplete} />
+      </div>
+    )
+  }
+
+  const daysUntilExam = getDaysUntilExam(profile.examDate)
 
   const totalMinutes = useMemo(
     () => tasks.reduce((acc, t) => acc + t.minutes, 0),
@@ -69,8 +69,8 @@ const App = () => {
       <main className="screen">
         {activeTab === 'home' && (
           <HomeScreen
-            userName={USER_NAME}
-            daysUntilExam={DAYS_UNTIL_EXAM}
+            profile={profile}
+            daysUntilExam={daysUntilExam}
             tasks={tasks}
             totalMinutes={totalMinutes}
             completedMinutes={completedMinutes}
@@ -78,7 +78,7 @@ const App = () => {
             onToggleTask={toggleTask}
           />
         )}
-        {activeTab === 'plan' && <PlanScreen />}
+        {activeTab === 'plan' && <PlanScreen profile={profile} />}
         {activeTab === 'topics' && <TopicsScreen />}
         {activeTab === 'scores' && <ScoresScreen />}
       </main>
@@ -89,7 +89,7 @@ const App = () => {
 }
 
 type HomeScreenProps = {
-  userName: string
+  profile: UserProfile
   daysUntilExam: number
   tasks: Task[]
   totalMinutes: number
@@ -99,7 +99,7 @@ type HomeScreenProps = {
 }
 
 const HomeScreen = ({
-  userName,
+  profile,
   daysUntilExam,
   tasks,
   totalMinutes,
@@ -108,13 +108,18 @@ const HomeScreen = ({
   onToggleTask,
 }: HomeScreenProps) => {
   const remainingMinutes = totalMinutes - completedMinutes
+  const studyLabel =
+    profile.studyMode === 'dedicated' ? 'Dedicated study' : 'Alongside classes'
 
   return (
     <section className="screen-content">
       <header className="screen-header">
         <div>
-          <p className="eyebrow">Step 1 Planner</p>
-          <h1 className="title">Welcome back, {userName}</h1>
+          <p className="eyebrow">{examTypeLabel(profile.examType)}</p>
+          <h1 className="title">Welcome back, {profile.name}</h1>
+          <p className="muted header-meta">
+            {studyLabel} · {profile.hoursPerDay}h/day target
+          </p>
         </div>
         <div className="pill days-pill">
           <span className="days-number">{daysUntilExam}</span>
@@ -127,7 +132,11 @@ const HomeScreen = ({
           <div>
             <h2>Today&apos;s focus</h2>
             <p className="muted">
-              Practice first, then tighten up weak spots.
+              {daysUntilExam > 90
+                ? 'Build foundations — balance content with questions.'
+                : daysUntilExam < 30
+                  ? 'Exam crunch — prioritize questions and review.'
+                  : 'Practice first, then tighten up weak spots.'}
             </p>
           </div>
           <span className="tag">{progressPct}%</span>
@@ -180,12 +189,17 @@ const HomeScreen = ({
   )
 }
 
-const PlanScreen = () => (
+const PlanScreen = ({ profile }: { profile: UserProfile }) => (
   <section className="screen-content placeholder">
     <h1 className="title">Study plan</h1>
     <p className="muted">
-      Map out your weeks leading up to test day. You&apos;ll be able to set
-      daily question and Anki targets here.
+      {profile.hoursPerDay} hours/day until{' '}
+      {new Date(profile.examDate + 'T00:00:00').toLocaleDateString(undefined, {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      })}
+      . Weekly targets coming soon.
     </p>
   </section>
 )
@@ -237,36 +251,6 @@ const TabBar = ({ activeTab, onChange }: TabBarProps) => {
       ))}
     </nav>
   )
-}
-
-function labelForType(type: TaskType): string {
-  switch (type) {
-    case 'questions':
-      return 'Practice questions'
-    case 'review':
-      return 'Review wrong answers'
-    case 'anki':
-      return 'Anki'
-    case 'reading':
-      return 'Reading'
-    default:
-      return ''
-  }
-}
-
-function priorityLabelForType(type: TaskType): string {
-  switch (type) {
-    case 'questions':
-      return 'High'
-    case 'review':
-      return 'High'
-    case 'anki':
-      return 'Medium'
-    case 'reading':
-      return 'Low'
-    default:
-      return ''
-  }
 }
 
 export default App
